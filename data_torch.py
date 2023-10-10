@@ -8,7 +8,7 @@ from skimage import exposure
 from sklearn.metrics import multilabel_confusion_matrix, confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc, roc_auc_score, average_precision_score
 import matplotlib.pyplot as plt
 from torchvision.transforms import Compose, ToTensor, RandomRotation, RandomHorizontalFlip, Normalize
-from scipy.ndimage import rotate
+from scipy.ndimage import rotate, zoom
 from scipy.stats import t
 from concurrent.futures import ThreadPoolExecutor
 import threading
@@ -41,18 +41,61 @@ def load_dicom_data(folder_path, num_train, num_val = 0):
     test_list = dicom_list[num_train:]
     return train_list, test_list
 
-def normalize_image(ds, window = (950,400)):
-    # ds is a dicom image
-    # window is a tuple containing (window width, window level)
+def process_patient_images(folder_path, resize_shape = (256,256)):
+    patient_images = []
     
-	ds.WindowWidth = window[0]
-	ds.WindowLevel = window[1]
-	pixel_array = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept
-	pixel_array[pixel_array < (ds.WindowLevel - 0.5 - (ds.WindowWidth - 1) / 2)] = 0
-	pixel_array[pixel_array > (ds.WindowLevel - 0.5 + (ds.WindowWidth - 1) / 2)] = ds.WindowWidth - 1
-	pixel_array = (pixel_array - (ds.WindowLevel - 0.5)) / (ds.WindowWidth - 1)
-	output = pixel_array.astype(float)
-	return output
+    for filename in os.listdir(folder_path):
+        # Load the DICOM image
+        ds = pydicom.dcmread(os.path.join(folder_path, filename))
+
+        # Normalize the pixel array
+        pixel_array = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept
+        # Reshape image for model input
+        image = cv2.resize(pixel_array, resize_shape)
+        axial_slice = ds.ImagePositionPatient[2]
+        # record slice location with the image
+        patient_images.append((axial_slice,image))
+
+    patient_images.sort(reverse=True)
+    sorted_images = []
+    for _, image in patient_images[30:len(patient_images)-20]: # skips the first 30 and last 20 images in the axial plane
+        sorted_images.append(image)
+    pixel_spacing, slice_thickness = get_pixel_spacing(folder_path)
+    sorted_images = resample_image(np.stack(sorted_images), slice_thickness, pixel_spacing)
+    return sorted_images
+
+def get_pixel_spacing(folder_path):
+    first_file = os.listdir(folder_path)[0]
+    ds = pydicom.dcmread(os.path.join(folder_path, first_file))
+#    const_pixel_dims = (int(ds.Rows), int(ds.Columns), len(os.listdir(folder_path)))
+    return (float(ds.PixelSpacing[0]), float(ds.PixelSpacing[1])),float(ds.SliceThickness)
+
+def resample_image(image_stack, slice_thickness, pixel_spacing):
+    # Calculate the current pixel dimensions
+    x_pixel_dim, y_pixel_dim = pixel_spacing
+    z_pixel_dim = slice_thickness
+
+    # Calculate the scaling factors
+    x_scale = x_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
+    y_scale = y_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
+    z_scale = z_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
+
+    # Rescale the image stack
+    resampled_image_stack = zoom(image_stack, (z_scale, y_scale, x_scale))
+
+    return resampled_image_stack
+
+def apply_window(image_stack, window, rescale = True):
+    window_width = window[0]
+    window_center = window[1]
+    img = image_stack.copy()
+    img_min = window_center - window_width//2 #minimum HU level
+    img_max = window_center + window_width//2 #maximum HU level
+    img[img<img_min] = img_min #set img_min for all HU levels less than minimum HU level
+    img[img>img_max] = img_max #set img_max for all HU levels higher than maximum HU level
+    if rescale:
+        img = (img - img_min) / (img_max - img_min)*255.0
+    return img.astype(float)
 
 def middle_slices(image, percentage=50):
     # returns the middle percentage of an axial stack
@@ -62,16 +105,7 @@ def middle_slices(image, percentage=50):
     end = n_slices - start
     return image[:, :, start:end]
 
-def generate_train_test_data(train_list, test_list, dicom_data_folder, label_data, angle_requests = [(0,50),(90,60)]):
-    # calls two instances of generate_patient_data_multiangle for the training and test set
-    # not the best idea for single channel model since the test set doesn't need augmentation
-    
-	print('generate training set')
-	X_train, y_train = generate_patient_data_multiangle(train_list, dicom_data_folder, label_data, angle_requests, multichannel = False)
-	print('generate testing set')
-	X_test, y_test = generate_patient_data_multiangle(test_list, dicom_data_folder, label_data, angle_requests, multichannel = False)
-	return X_train, y_train, X_test, y_test
-
+### Generating Oblique AvIP views
 def show_avg_oblique(axial_stack, z_rotation_angle, ax):
     # display the generated AvIPs
     # z_rotation angle is a tuple (rotation angle in the z-axis, % of the axial stack to average starting in the middle)
@@ -87,8 +121,7 @@ def show_avg_oblique(axial_stack, z_rotation_angle, ax):
         ax.set_title(f"Angle: {rotation_angle[0]}, Depth: {rotation_angle[1]}%")
         return avg_sagittal
 
-        
-def generate_avg_oblique(axial_stack, z_rotation_angle):
+def generate_avg_oblique_z(axial_stack, z_rotation_angle):
     # z_rotation angle is a tuple (rotation angle in the z-axis, % of the axial stack to average starting in the middle)
     # most calls have the axial_stack as patient images, which is the output of process_patient_images
     if axial_stack.any():
@@ -97,10 +130,11 @@ def generate_avg_oblique(axial_stack, z_rotation_angle):
 
         # Calculate average sagittal slice from the rotated stack
         avg_sagittal = np.mean(middle_slices(rotated_axial_stack, z_rotation_angle[1]), axis=2)
-        avg_sagittal = cv2.resize(avg_sagittal, (256, 256))
+#        avg_sagittal = cv2.resize(avg_sagittal, (256, 256))
         return avg_sagittal
 
-def generate_patient_data_multiangle(patient_list, dicom_data_folder, label_data, angle_requests, multichannel = False, windows = [(950,400)], is_test_set = False):
+### Main Function
+def generate_patient_data_multiangle(patient_list, dicom_data_folder, label_data, angle_requests, windows = [(950,400)], multichannel = False, is_test_set = False):
     # takes a list of StudyInstanceUID names (patient_list) and the folder they are stored in (dicom_data_folder) and the matching label data loaded from load_label_data
     # angle_requests is a list of tuples containing (angle, % image to average over)
     # multichannel creates a single stack with multiple AvIPs to one label
@@ -110,19 +144,21 @@ def generate_patient_data_multiangle(patient_list, dicom_data_folder, label_data
     if is_test_set:
     # set angle_request to only contain the sagittal
         angle_requests = [(0,100)]
-        windows = [(600,100)]
+        windows = [(800,350)]
     for counter, patient_id in enumerate(patient_list, 1):
     # iterate through each study folder
         print(counter, "/", len(patient_list))
+        folder_path = os.path.join(dicom_data_folder, patient_id)
         label = label_data.loc[patient_id][0]
+        patient_images = process_patient_images(folder_path)
         all_avips = []
         for window in windows:
         # for each window setting, generate the axial stack
-            patient_images = process_patient_images(patient_id, dicom_data_folder, window)
+            windowed_images = apply_window(patient_images, window, rescale = True)
             print(patient_images.shape)
             for angle in angle_requests:
             # for each angle, generate the associated AvIP
-                all_avips.append(generate_avg_oblique(patient_images, angle))
+                all_avips.append(generate_avg_oblique_z(windowed_images, angle))
         if multichannel:
             all_avips = np.stack(all_avips, axis = -1)
             X_data.append(all_avips)
@@ -138,24 +174,6 @@ def generate_patient_data_multiangle(patient_list, dicom_data_folder, label_data
     y_data = np.array(y_data).reshape(-1, 1)
     return X_data, y_data
 
-def process_patient_images(patient_id, dicom_data_folder, window = (950,400)):
-	patient_images = []
-	
-	for filename in os.listdir(os.path.join(dicom_data_folder, patient_id)):
-		# Load the DICOM image
-		ds = pydicom.dcmread(os.path.join(dicom_data_folder, patient_id, filename))
-		ds.PhotometricInterpretation = 'YBR_FULL'
-		# Normalize the pixel array
-		image = normalize_image(ds, window)
-		image = cv2.resize(image, (256, 256))
-		axial_slice = ds.ImagePositionPatient[2]
-		patient_images.append((axial_slice,image))
-		#patient_labels.append(label)
-	patient_images.sort(reverse=True)
-	sorted_images = []
-	for _, image in patient_images[30:len(patient_images)-20]: # skips the first 30 and last 20 images in the axial plane
-		sorted_images.append(image)
-	return np.stack(sorted_images)
 
 def display_images(X_data, multichannel):
     num_images = len(X_data)
@@ -173,6 +191,138 @@ def display_images(X_data, multichannel):
             plt.imshow(X_data[i].squeeze(), cmap='gray')
             plt.title(f'Image {i+1}')
             plt.show()
+
+def compute_metrics(y_test, predictions, multi=False, threshold_type = 'youden'):
+
+    if multi:
+        accuracy = accuracy_score(y_test, np.round(predictions))
+        precision = precision_score(y_test, np.round(predictions), average='weighted')
+        recall = recall_score(y_test, np.round(predictions), average='weighted')
+        f1 = f1_score(y_test, np.round(predictions), average='weighted')
+        roc_auc = roc_auc_score(y_test, predictions, average='weighted', multi_class="ovr")
+    if not multi:
+        fpr, tpr, thresholds = roc_curve(y_test, predictions)
+        roc_auc = auc(fpr, tpr)
+        youden_index = tpr - fpr
+        if threshold_type == 'youden':
+            best_threshold = thresholds[np.argmax(youden_index)]
+        # Select the threshold to maximize recall
+        if threshold_type == 'max_tpr':
+            best_threshold = thresholds[np.argmax(tpr)]
+        binary_predicted_labels = (predictions > best_threshold).astype(int)
+
+        # compute the confusion matrix
+        cm = confusion_matrix(y_test, binary_predicted_labels)
+
+        # compute the evaluation metrics
+        accuracy = accuracy_score(y_test, binary_predicted_labels)
+        precision = precision_score(y_test, binary_predicted_labels)
+        recall = recall_score(y_test, binary_predicted_labels)
+        f1 = f1_score(y_test, binary_predicted_labels)
+
+        # compute sensitivity and specificity
+        sensitivity = recall
+        specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1])
+
+    return accuracy, precision, recall, f1, roc_auc, fpr, tpr, best_threshold, sensitivity, specificity
+
+
+def plot_roc_curve(fpr, tpr, roc_auc):
+	# Plot the ROC curve
+	plt.plot(fpr, tpr, color='blue', lw=2, label='ROC curve (area = %0.2f)' % roc_auc)
+	plt.plot([0, 1], [0, 1], color='grey', lw=2, linestyle='--', label='Random Guess')
+	plt.xlabel('False Positive Rate')
+	plt.ylabel('True Positive Rate')
+	plt.title('Receiver Operating Characteristic (ROC) Curve')
+	plt.legend(loc="lower right")
+	plt.show()
+
+def process_single_patient(patient_id, dicom_data_folder, label_data, angle_requests, multichannel, windows, is_test_set):
+    thread_safe_print(patient_id)
+    label = label_data.loc[patient_id][0]
+    all_avips = []
+    folder_path = os.path.join(dicom_data_folder, patient_id)
+    patient_images = process_patient_images(folder_path)
+    for window in windows:
+        windowed_images = apply_window(patient_images, window, rescale = True)
+        for angle in angle_requests:
+            all_avips.append(generate_avg_oblique_z(windowed_images, angle))
+
+    if multichannel:
+        all_avips = np.stack(all_avips, axis=-1)
+        return all_avips, label
+    else:
+        return [(avip, label) for avip in all_avips]
+
+def generate_patient_data_multiangle_parallel(patient_list, dicom_data_folder, label_data, angle_requests, multichannel=False, windows=[(950, 400)], is_test_set=False, n_workers=4):
+    if is_test_set:
+        angle_requests = [(0, 100)]
+        windows = [(800, 350)]
+
+    X_data = []
+    y_data = []
+
+    with ThreadPoolExecutor(max_workers=n_workers) as executor:
+        results = executor.map(
+            process_single_patient,
+            patient_list,
+            [dicom_data_folder] * len(patient_list),
+            [label_data] * len(patient_list),
+            [angle_requests] * len(patient_list),
+            [multichannel] * len(patient_list),
+            [windows] * len(patient_list),
+            [is_test_set] * len(patient_list),
+        )
+
+        for result in results:
+            if multichannel:
+                X_data.append(result[0])
+                y_data.append(result[1])
+            else:
+                for avip, label in result:
+                    X_data.append(avip)
+                    y_data.append(label)
+
+    if multichannel:
+        X_data = np.array(X_data).transpose(0, 3, 1, 2)
+    else:
+        X_data = np.array(X_data)[:, np.newaxis, :, :]
+
+    y_data = np.array(y_data).reshape(-1, 1)
+
+    return X_data, y_data
+
+
+######################
+### No longer used ###
+######################
+def generate_cs_patient_data(patient_list, dicom_data_folder, label_data):
+    # Like generate_patient_data but also creates a coronal AvIP
+    X_data = []
+    y_data = []
+
+    for counter, patient_id in enumerate(patient_list, 1):
+        print(counter, "/", len(patient_list))
+        axial_stack = process_patient_images(patient_id, dicom_data_folder)
+        label = label_data.loc[patient_id]
+        if axial_stack.any():
+            # Calculate average sagittal slice
+            avg_sagittal = np.mean(axial_stack[:, :, 2*axial_stack.shape[2] // 8:6 * axial_stack.shape[2] // 8], axis=2)
+            avg_sagittal = cv2.resize(avg_sagittal, (256, 256))
+                      
+            # Calculate average coronal slice
+            avg_coronal = np.mean(axial_stack[:, 1*axial_stack.shape[1] // 10:9 * axial_stack.shape[1] // 10, :], axis=1)
+            avg_coronal = cv2.resize(avg_coronal, (256, 256))
+
+            # Combine sagittal and coronal slices into a single array
+            combined_slices = np.stack([avg_sagittal, avg_coronal], axis=-1)
+
+            X_data.append(combined_slices)
+            y_data.append(label[0])
+
+    X_data = np.array(X_data).transpose(0, 3, 1, 2)  # Change the dimensions to (batch, channels, height, width) for PyTorch
+    y_data = np.array(y_data).reshape(-1, 1)
+    return X_data, y_data
 
 def apply_augmentation(X, y, seed=42):
     # Define the data augmentation pipeline
@@ -264,134 +414,3 @@ def apply_augmentation_multi(X, y, seed=42):
     y_augmented = torch.stack(y_augmented)
 
     return X_augmented, y_augmented
-
-def compute_metrics(y_test, predictions, multi=False, threshold_type = 'youden'):
-
-    if multi:
-        accuracy = accuracy_score(y_test, np.round(predictions))
-        precision = precision_score(y_test, np.round(predictions), average='weighted')
-        recall = recall_score(y_test, np.round(predictions), average='weighted')
-        f1 = f1_score(y_test, np.round(predictions), average='weighted')
-        roc_auc = roc_auc_score(y_test, predictions, average='weighted', multi_class="ovr")
-    if not multi:
-        fpr, tpr, thresholds = roc_curve(y_test, predictions)
-        roc_auc = auc(fpr, tpr)
-        youden_index = tpr - fpr
-        if threshold_type == 'youden':
-            best_threshold = thresholds[np.argmax(youden_index)]
-        # Select the threshold to maximize recall
-        if threshold_type == 'max_tpr':
-            best_threshold = thresholds[np.argmax(tpr)]
-        binary_predicted_labels = (predictions > best_threshold).astype(int)
-
-        # compute the confusion matrix
-        cm = confusion_matrix(y_test, binary_predicted_labels)
-
-        # compute the evaluation metrics
-        accuracy = accuracy_score(y_test, binary_predicted_labels)
-        precision = precision_score(y_test, binary_predicted_labels)
-        recall = recall_score(y_test, binary_predicted_labels)
-        f1 = f1_score(y_test, binary_predicted_labels)
-
-        # compute sensitivity and specificity
-        sensitivity = recall
-        specificity = cm[0, 0] / (cm[0, 0] + cm[0, 1])
-
-    return accuracy, precision, recall, f1, roc_auc, fpr, tpr, best_threshold, sensitivity, specificity
-
-
-def plot_roc_curve(fpr, tpr, roc_auc):
-	# Plot the ROC curve
-	plt.plot(fpr, tpr, color='blue', lw=2, label='ROC curve (area = %0.2f)' % roc_auc)
-	plt.plot([0, 1], [0, 1], color='grey', lw=2, linestyle='--', label='Random Guess')
-	plt.xlabel('False Positive Rate')
-	plt.ylabel('True Positive Rate')
-	plt.title('Receiver Operating Characteristic (ROC) Curve')
-	plt.legend(loc="lower right")
-	plt.show()
-
-def process_single_patient(patient_id, dicom_data_folder, label_data, angle_requests, multichannel, windows, is_test_set):
-    thread_safe_print(patient_id)
-    label = label_data.loc[patient_id][0]
-    all_avips = []
-    for window in windows:
-        patient_images = process_patient_images(patient_id, dicom_data_folder, window)
-        for angle in angle_requests:
-            all_avips.append(generate_avg_oblique(patient_images, angle))
-
-    if multichannel:
-        all_avips = np.stack(all_avips, axis=-1)
-        return all_avips, label
-    else:
-        return [(avip, label) for avip in all_avips]
-
-def generate_patient_data_multiangle_parallel(patient_list, dicom_data_folder, label_data, angle_requests, multichannel=False, windows=[(950, 400)], is_test_set=False, n_workers=4):
-    if is_test_set:
-        angle_requests = [(0, 100)]
-        windows = [(950, 400)]
-
-    X_data = []
-    y_data = []
-
-    with ThreadPoolExecutor(max_workers=n_workers) as executor:
-        results = executor.map(
-            process_single_patient,
-            patient_list,
-            [dicom_data_folder] * len(patient_list),
-            [label_data] * len(patient_list),
-            [angle_requests] * len(patient_list),
-            [multichannel] * len(patient_list),
-            [windows] * len(patient_list),
-            [is_test_set] * len(patient_list),
-        )
-
-        for result in results:
-            if multichannel:
-                X_data.append(result[0])
-                y_data.append(result[1])
-            else:
-                for avip, label in result:
-                    X_data.append(avip)
-                    y_data.append(label)
-
-    if multichannel:
-        X_data = np.array(X_data).transpose(0, 3, 1, 2)
-    else:
-        X_data = np.array(X_data)[:, np.newaxis, :, :]
-
-    y_data = np.array(y_data).reshape(-1, 1)
-
-    return X_data, y_data
-
-
-
-### No longer used ###
-
-def generate_cs_patient_data(patient_list, dicom_data_folder, label_data):
-    # Like generate_patient_data but also creates a coronal AvIP
-    X_data = []
-    y_data = []
-
-    for counter, patient_id in enumerate(patient_list, 1):
-        print(counter, "/", len(patient_list))
-        axial_stack = process_patient_images(patient_id, dicom_data_folder)
-        label = label_data.loc[patient_id]
-        if axial_stack.any():
-            # Calculate average sagittal slice
-            avg_sagittal = np.mean(axial_stack[:, :, 2*axial_stack.shape[2] // 8:6 * axial_stack.shape[2] // 8], axis=2)
-            avg_sagittal = cv2.resize(avg_sagittal, (256, 256))
-                      
-            # Calculate average coronal slice
-            avg_coronal = np.mean(axial_stack[:, 1*axial_stack.shape[1] // 10:9 * axial_stack.shape[1] // 10, :], axis=1)
-            avg_coronal = cv2.resize(avg_coronal, (256, 256))
-
-            # Combine sagittal and coronal slices into a single array
-            combined_slices = np.stack([avg_sagittal, avg_coronal], axis=-1)
-
-            X_data.append(combined_slices)
-            y_data.append(label[0])
-
-    X_data = np.array(X_data).transpose(0, 3, 1, 2)  # Change the dimensions to (batch, channels, height, width) for PyTorch
-    y_data = np.array(y_data).reshape(-1, 1)
-    return X_data, y_data
-

@@ -11,9 +11,61 @@ import matplotlib.pyplot as plt
 from model_torch import create_model_multichannel, ensemble_predict, train_model_multi, train_model_single_validation
 from data_torch import *
 
+BASE_PATH = f'/kaggle/input/rsna-2023-abdominal-trauma-detection'
+train_label = pd.read_csv(f'{BASE_PATH}/train.csv')
+train_series_meta = pd.read_csv(f'{BASE_PATH}/train_series_meta.csv')
+train_series_meta.merge(train_label, how = 'outer', on = 'patient_id')
+
+
+def load_label_data(csv_path):
+    # takes a csv file path, outputs a pandas table indexed by the StudyInstanceUID
+    label_data = pd.read_csv(csv_path)
+    label_data.set_index('patient_id', inplace=True)
+    return label_data
+
+def load_dicom_data(folder_path, num_train, num_val = 0):
+    # takes a folder path to a folder containing multiple DICOM folders (that contain the dicom images) and makes two lists of study names
+    # the nested DICOM folders are named with the StudyInstanceUID
+    # if the total number of DICOM folders is n, the studies are split into a train and test set of size num_train and n - num_train
+    dicom_list = os.listdir(folder_path)
+    dicom_list.remove('.DS_Store')
+    if num_val > 0:
+        val_index = num_train+num_val
+        train_list = dicom_list[:num_train]
+        val_list = dicom_list[num_train:val_index]
+        test_list = dicom_list[val_index:]
+        return train_list, val_list, test_list
+    train_list = dicom_list[:num_train]
+    test_list = dicom_list[num_train:]
+    return train_list, test_list
+
+def process_patient_images(folder_path, resize_shape = (256,256)):
+    patient_images = []
+    
+    for filename in os.listdir(folder_path):
+        # Load the DICOM image
+        ds = pydicom.dcmread(os.path.join(folder_path, filename))
+
+        # Normalize the pixel array
+        pixel_array = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept
+        # Reshape image for model input
+        image = cv2.resize(pixel_array, resize_shape)
+        axial_slice = ds.ImagePositionPatient[2]
+        # record slice location with the image
+        patient_images.append((axial_slice,image))
+
+    patient_images.sort(reverse=True)
+    sorted_images = []
+    for _, image in patient_images[30:len(patient_images)-20]: # skips the first 30 and last 20 images in the axial plane
+        sorted_images.append(image)
+    pixel_spacing, slice_thickness = get_pixel_spacing(folder_path)
+    sorted_images = resample_image(np.stack(sorted_images), slice_thickness, pixel_spacing)
+    return sorted_images
+
+
 def load_data():
 #    Load the label data
-    label_data = load_label_data('train.csv')
+    label_data = load_label_data(f'{BASE_PATH}/train.csv')
     dicom_data_folder = 'dicom_data'
     
     # Load the bounding box data

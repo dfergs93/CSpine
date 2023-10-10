@@ -21,7 +21,7 @@ class CustomDataset(Dataset):
 
 def create_model_multichannel(num_channels):
     #handles any number of channels for inputs, depending on the shape of X_data
-    base_model = timm.create_model("tf_efficientnetv2_s", pretrained=True, in_chans=num_channels)  # Update the number of input channels
+    base_model = timm.create_model("densenet121", pretrained=True, in_chans=num_channels, num_classes = 2)  # Update the number of input channels
     num_features = base_model.classifier.in_features
     base_model.classifier = nn.Linear(num_features, 1)
     base_model.classifier.out_features = 1

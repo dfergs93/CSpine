@@ -10,26 +10,47 @@ import tkinter as tk
 from tkinter import filedialog
 from PIL import Image, ImageTk, ImageOps
 
-default_folder_path = '/Users/duncanferguson/Desktop/CSpine/dicom_data/1.2.826.0.1.3680043.634'
-output_path = '/Users/duncanferguson/Desktop/CSpine/npz_datasets'
+default_folder_path = '../sample_dicom/1.2.826.0.1.3680043.634'
+output_path = '../output'
 
-def process_patient_images(folder_path):
+
+
+def process_patient_images(folder_path, resample = True):
     patient_images = []
     patient_id = folder_path.split("/")[-1]
-    for filename in os.listdir(folder_path):
-        # Load the DICOM image
-        ds = pydicom.dcmread(os.path.join(folder_path, filename))
-        # Normalize the pixel array
-        pixel_array = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept
-        axial_slice = ds.ImagePositionPatient[2]
-        patient_images.append((axial_slice, pixel_array))
+    patient_file_path = os.path.join(output_path, patient_id, f"{patient_id}.npy")
     
-    patient_images.sort(reverse=True)
-    sorted_images = []
-    for _, image in patient_images: # skips the first 30 and last 20 images in the axial plane
-        sorted_images.append(image)
-    np.save(output_path + f"{patient_id}.npy", np.stack(sorted_images))
-    return np.stack(sorted_images)
+    if os.path.isfile(patient_file_path):
+        preload_data = np.load(patient_file_path)
+        return preload_data
+    else:
+        pixel_spacing, slice_thickness = get_pixel_spacing(folder_path)
+        dicom_files = os.listdir(folder_path)
+        # First, load only the metadata of the DICOM files to sort them
+        for filename in dicom_files:
+            # Load only the metadata
+            
+            ds = pydicom.dcmread(os.path.join(folder_path, filename), stop_before_pixels=True, force = True)
+            axial_slice = ds.ImagePositionPatient[2]
+            patient_images.append((axial_slice, filename))
+        
+        patient_images.sort(reverse=True)
+        sorted_images = []
+        # Now, fully load only the necessary slices
+        for _, filename in patient_images: # skips the first 30 and last 20 images in the axial plane
+            print(filename)
+            ds = pydicom.dcmread(os.path.join(folder_path, filename)) # Full load here
+            # Normalize the pixel array
+            pixel_array = ds.pixel_array * ds.RescaleSlope + ds.RescaleIntercept
+            sorted_images.append(pixel_array)
+        if not resample:
+            sorted_stack = np.stack(sorted_images)
+        else:
+            sorted_stack = resample_stack(np.stack(sorted_images), slice_thickness, pixel_spacing)
+        os.makedirs(os.path.join(output_path, patient_id), exist_ok=True)
+        np.save(patient_file_path, sorted_stack)
+        return sorted_stack
+
     
 def load_plane(axial_stack, plane = 'sag'):
     global global_axial_stack
@@ -58,7 +79,7 @@ def apply_window(image_stack, window, rescale = False):
     img[img<img_min] = img_min #set img_min for all HU levels less than minimum HU level
     img[img>img_max] = img_max #set img_max for all HU levels higher than maximum HU level
     if rescale:
-        img = (img - img_min) / (img_max - img_min)*255.0
+        img = (img - img_min) / (img_max - img_min)
     return img.astype(float)
 
 def apply_mask(image_stack, window, mask_window = (700,400)):
@@ -67,7 +88,7 @@ def apply_mask(image_stack, window, mask_window = (700,400)):
     windowed_stack = windowed_stack * mask
     return windowed_stack
 
-def create_mask(image, threshold=150):
+def create_mask(image, threshold=.6):
     """
     Create a binary mask where all pixels above a certain threshold are kept.
     """
@@ -77,7 +98,7 @@ def create_mask(image, threshold=150):
 
 def mask_patient_images(axial_stack, window = (700,400)):
     # Create a 3D mask from the normalized image stack
-    axial_stack = apply_window(axial_stack, window)
+    axial_stack = apply_window(axial_stack, window, True)
     mask = create_mask(axial_stack)
     return mask
 
@@ -98,31 +119,36 @@ def center_stack(image_stack, point, num_slices=400):
     # Return the region of interest
     return image_stack[lower_index:upper_index, lower_y:upper_y, lower_x:upper_x]
 
-def resample_image(image_stack, slice_thickness, pixel_spacing):
+def resample_stack(image_stack, slice_thickness, pixel_spacing):
     # Calculate the current pixel dimensions
     x_pixel_dim, y_pixel_dim = pixel_spacing
     z_pixel_dim = slice_thickness
-
+    
+    # Check if resampling is necessary
+    if x_pixel_dim == y_pixel_dim == z_pixel_dim:
+        return image_stack
+        
+    min_dim = min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
     # Calculate the scaling factors
-    x_scale = x_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
-    y_scale = y_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
-    z_scale = z_pixel_dim / min([x_pixel_dim, y_pixel_dim, z_pixel_dim])
+    x_scale = x_pixel_dim / min_dim
+    y_scale = y_pixel_dim / min_dim
+    z_scale = z_pixel_dim / min_dim
 
     # Rescale the image stack
     resampled_image_stack = zoom(image_stack, (z_scale, y_scale, x_scale))
 
     return resampled_image_stack
 
-def generate_avg_oblique_2(axial_stack, x_angle, z_angle):
-    axial_stack = middle_slices(axial_stack, 80)
+def generate_avg_oblique_2(axial_stack, x_angle, z_angle, middle_pct = 80):
+    axial_stack = middle_slices(axial_stack, middle_pct)
     # Rotate the axial stack by the specified rotation_angle (in degrees) in the x-axis
     rotated_axial_stack = rotate(axial_stack, x_angle, axes=(0, 1), reshape=False)
     # Rotate the axial stack by the specified rotation_angle (in degrees) in the z-axis
     rotated_axial_stack = rotate(rotated_axial_stack, z_angle, axes=(1, 2), reshape=False)
 
     # Calculate average sagittal slice from the rotated stack
-#    avg_sagittal = np.mean(rotated_axial_stack, axis=2)
-    avg_sagittal = weighted_average_3d(rotated_axial_stack, 0.8, 0.2)
+    avg_sagittal = np.mean(rotated_axial_stack, axis=2)
+    #avg_sagittal = weighted_average_3d(rotated_axial_stack, 0.5, 0.5)
     return avg_sagittal
 
 def weighted_average_3d(image_stack, start_weight=0.5, end_weight=0.5):
@@ -146,7 +172,7 @@ def weighted_average_3d(image_stack, start_weight=0.5, end_weight=0.5):
     # Compute the weighted average along the third axis
     weighted_average = np.sum(image_stack * weight_tensor, axis=2) / np.sum(weight_tensor, axis=2)
 
-    return weighted_average
+    return 255 - weighted_average
 
 def generate_single_patient_image(axial_stack, angle, window, mask = False):
     windowed_stack = apply_window(axial_stack, window)
@@ -154,7 +180,7 @@ def generate_single_patient_image(axial_stack, angle, window, mask = False):
     if mask:
         windowed_stack = apply_mask(axial_stack,window)
     
-    avip = generate_avg_oblique_2(windowed_stack, 0, angle)
+    avip = generate_avg_oblique_2(windowed_stack, angle[1], angle[0], middle_pct = angle[2])
 
     return avip
 
@@ -162,7 +188,7 @@ def display_generated_image(image):
     plt.figure()
     plt.imshow(image, cmap='gray')
     mid_y, mid_x = np.array(image.shape) // 2  # Calculate the center point of the image
-    plt.plot(mid_x, mid_y, 'w,')  # 'ro' stands for red color and circle marker
+    #plt.plot(mid_x, mid_y, 'b.')  # 'ro' stands for red color and circle marker
     plt.show()
 
 def scroll_axial_stack(axial_stack):
@@ -190,7 +216,7 @@ def scroll_axial_stack(axial_stack):
 
             if len(points) == 2:
                 x_angle, z_angle = calculate_required_angles(points)
-                print("Required angles: CC =", x_angle, "TR =", -1* round(z_angle-270.0,1))
+                print("Required angles: CC =", x_angle, "TR =", round(z_angle,1))
                 num_slices = int(center_var.get())
                 centered_stack = center_stack(axial_stack, points[0], num_slices)
                 # Call generate_avg_oblique with the calculated x_angle and z_angle
@@ -319,10 +345,13 @@ def calculate_required_angles(points, axial_spacing=1):
     dx = points[1][0] - points[0][0]
     dy = points[1][1] - points[0][1]
     dz = (points[1][2] - points[0][2]) * axial_spacing
-
-    x_angle = np.arctan2(dy, dz) * 180 / np.pi
+    
+    if dy < 0:
+        x_angle = np.arctan2(-dy, dz) * 180 / np.pi
+    else:
+        x_angle = np.arctan2(dy, dz) * 180 / np.pi
     x_angle = round(90.0 - x_angle, 1)
-    z_angle = round(np.arctan2(dy, dx) * 180 / np.pi, 1)+180
+    z_angle = round(np.arctan2(dy, dx) * 180 / np.pi, 1)
 
     return x_angle, z_angle
 
@@ -362,22 +391,20 @@ def load_axial_stack():
     global global_axial_stack
     folder_path = folder_var.get()
     global_axial_stack = process_patient_images(folder_path)
-    pixel_spacing, slice_thickness = get_pixel_spacing(folder_path)
-    global_axial_stack = resample_image(global_axial_stack, slice_thickness, pixel_spacing)
     print('Done Loading')
 
 def get_pixel_spacing(folder_path):
     first_file = os.listdir(folder_path)[0]
-    ds = pydicom.dcmread(os.path.join(folder_path, first_file))
+    ds = pydicom.dcmread(os.path.join(folder_path, first_file), stop_before_pixels = True)
 #    const_pixel_dims = (int(ds.Rows), int(ds.Columns), len(os.listdir(folder_path)))
     return (float(ds.PixelSpacing[0]), float(ds.PixelSpacing[1])),float(ds.SliceThickness)
     
 root = tk.Tk()
 
-angle_var = tk.StringVar(value = '0,80')
+angle_var = tk.StringVar(value = '0,0,80')
 window_var = tk.StringVar(value = '950,400')
 folder_var = tk.StringVar(value=default_folder_path)
-center_var = tk.StringVar(value = '300')
+center_var = tk.StringVar(value = '400')
 load_axial_stack()
 
 
@@ -392,14 +419,14 @@ folder_entry = tk.Entry(root, textvariable=folder_var)
 folder_button = tk.Button(root, text="Browse", command=browse_folder)
 
 generate_button = tk.Button(root, text="Generate Image", command=create_image)
-mask_button = tk.Button(root, text="Generate Mask Image", command=lambda:create_image(mask=True))
+#mask_button = tk.Button(root, text="Generate Mask Image", command=lambda:create_image(mask=True))
 label = tk.Label(root)
 scroll_button = tk.Button(root, text="Scroll Axial Stack", command=lambda: scroll_axial_stack(apply_window(global_axial_stack, window = tuple(map(int, window_var.get().split(','))))))
 scroll_button.grid(row=5, column=0, columnspan=3)
 sag_scroll_button = tk.Button(root, text="Scroll Sagittal Stack", command=lambda: scroll_sagittal_stack(apply_window(global_axial_stack, window = tuple(map(int, window_var.get().split(','))))))
 sag_scroll_button.grid(row=5, column=1, columnspan=3)
-scroll_button2 = tk.Button(root, text="Scroll Masked Stack", command=lambda: scroll_axial_stack(apply_mask(global_axial_stack, window = tuple(map(int, window_var.get().split(','))))))
-scroll_button2.grid(row=6, column=0, columnspan=3)
+#scroll_button2 = tk.Button(root, text="Scroll Masked Stack", command=lambda: scroll_axial_stack(apply_mask(global_axial_stack, window = tuple(map(int, window_var.get().split(','))))))
+#scroll_button2.grid(row=6, column=0, columnspan=3)
 
 
 angle_label.grid(row=0, column=0)
@@ -411,9 +438,21 @@ center_entry.grid(row=1, column=3)
 folder_label.grid(row=2, column=0)
 folder_entry.grid(row=2, column=1)
 folder_button.grid(row=2, column=2)
-generate_button.grid(row=3, column=0)
-mask_button.grid(row=3, column=1)
+generate_button.grid(row=3, column=0, columnspan = 3)
+#mask_button.grid(row=3, column=1)
 label.grid(row=7, column=0, columnspan=3)
 
 root.mainloop()
 
+contrast_path = '../sample_dicom/PEwC_2'
+noncontrast_path = '../sample_dicom/PENC_2'
+contrast_stack = process_patient_images(contrast_path, resample = False)
+noncontrast_stack = process_patient_images(noncontrast_path, resample = False)
+contrast_image = generate_single_patient_image(contrast_stack, (270,0,80), (800,300))
+noncontrast_image = generate_single_patient_image(noncontrast_stack, (270,0,80), (800,300))
+subtracted_image = contrast_image - noncontrast_image
+
+def shift_sub_stacks(con_stack, noncon_stack, shift_val = 5):
+    x,y,z = con_stack.shape
+    a,b,c = noncon_stack.shape
+    shifted_con_stack = con_stack[:con_stack.shape[0]]

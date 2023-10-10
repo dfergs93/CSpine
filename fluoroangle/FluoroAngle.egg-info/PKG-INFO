@@ -1,0 +1,14 @@
+Metadata-Version: 2.1
+Name: FluoroAngle
+Version: 0.1.0
+Summary: Calculate gantry angles for fluoro procedures from CT DICOM images
+Home-page: 
+Author: Duncan Ferguson
+Author-email: duncan.ferguson@alumni.ubc.ca
+Classifier: Development Status :: 1 - Planning
+Classifier: Intended Audience :: Science/Research
+Classifier: License :: Free for non-commercial use
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.4
+Classifier: Programming Language :: Python :: 3.5

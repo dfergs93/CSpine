@@ -1,0 +1,8 @@
+setup.py
+FluoroAngle.egg-info/PKG-INFO
+FluoroAngle.egg-info/SOURCES.txt
+FluoroAngle.egg-info/dependency_links.txt
+FluoroAngle.egg-info/requires.txt
+FluoroAngle.egg-info/top_level.txt
+fluoroangle/__init__.py
+fluoroangle/fluoroangle.py

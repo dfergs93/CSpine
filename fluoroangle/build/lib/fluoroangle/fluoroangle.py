@@ -49,7 +49,7 @@ def middle_slices(image, percentage=50):
     end = n_slices - start
     return image[:, :, start:end]
 
-def apply_window(image_stack, window, rescale = False):
+def apply_window(image_stack, window, rescale = True):
     window_width = window[0]
     window_center = window[1]
     img = image_stack.copy()
