@@ -9,7 +9,7 @@ from sklearn.model_selection import StratifiedKFold, KFold
 from sklearn.metrics import confusion_matrix, accuracy_score, precision_score, recall_score, f1_score, roc_curve, auc
 import matplotlib.pyplot as plt
 from model_torch import create_model_multichannel, ensemble_predict, train_model_multi, train_model_single_validation
-from data_torch import normalize_image, load_label_data, load_dicom_data, generate_train_test_data,generate_patient_data_multiangle, compute_metrics, plot_roc_curve, generate_patient_data_multiangle_parallel
+from data_torch import *
 
 def load_data():
 #    Load the label data
@@ -19,8 +19,7 @@ def load_data():
     # Load the bounding box data
     bbox_data = load_label_data('train_bounding_boxes.csv')
     angle_requests = [
-        (0, 10),  # Average sagittal slice
-        (0, 40),
+        (0, 80),  # Average sagittal slice
 #        (135, 50),
 #        (80, 60),
 #        (85,60),
@@ -36,9 +35,7 @@ def load_data():
 #        (45, 50) #Add more angles and depth fractions as needed
     ]
     windows = [
-    (950,400),
-    (600, 100),
-    (10, 10)
+    (800,350)
     ]
 #    Prepare training and testing data
     num_train = 150
@@ -48,13 +45,13 @@ def load_data():
     X_train, y_train = generate_patient_data_multiangle_parallel(
         train_list, dicom_data_folder, label_data,
         angle_requests, multichannel = False, windows = windows, is_test_set = False)
-    np.savez('4 obliques and 3 windows with train test and val sets.npz', X_train=X_train, y_train=y_train, angle_requests = angle_requests, windows = windows)
+    np.savez('Tvt0-10-10angles.npz', X_train=X_train, y_train=y_train, angle_requests = angle_requests, windows = windows)
 
     X_val, y_val = generate_patient_data_multiangle(val_list, dicom_data_folder, label_data, angle_requests, multichannel = False, windows = windows, is_test_set = True)
-    np.savez('4 obliques and 3 windows with train test and val sets.npz', X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val)
+    np.savez('Tvt0-10-10angles.npz', X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val)
 
     X_test, y_test = generate_patient_data_multiangle(test_list, dicom_data_folder, label_data, angle_requests, multichannel = False, windows = windows, is_test_set = True)
-    np.savez('4 obliques and 3 windows with train test and val sets.npz', X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, X_test=X_test, y_test=y_test)
+    np.savez('Tvt0-10-10angles.npz', X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, X_test=X_test, y_test=y_test)
 
     print('Done')
 
@@ -71,7 +68,7 @@ def preload_data(data_file):
     
     return loaded_data
 
-input_data_file = '4 obliques and 3 windows with train test and val sets.npz'
+input_data_file = 'Tvt0-10-10angles.npz'
 #
 loaded_data = preload_data(input_data_file)
 X_train = loaded_data['X_train']
@@ -87,7 +84,7 @@ def train_model_without_kfold(X_train, y_train, X_val, y_val, model_name):
     model = train_model_single_validation(model, optimizer, loss_fn, X_train, y_train, X_val, y_val, epochs = 12, batch_size = 32)
     torch.save(model.state_dict(), model_name)
 
-train_model_without_kfold(X_train, y_train, X_val, y_val, '4o3w_model.pt')
+train_model_without_kfold(X_train, y_train, X_val, y_val, 'Tvt0-10-10angles.pt')
 
 def main_train_model(X,y,model_name, kfold_split = 3):
     print(X.shape)
