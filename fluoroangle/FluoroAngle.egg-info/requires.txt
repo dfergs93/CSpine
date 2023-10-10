@@ -1,0 +1,8 @@
+pandas
+numpy
+pydicom
+opencv-python
+scipy
+matplotlib
+tk
+Pillow
